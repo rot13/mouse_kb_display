@@ -1,0 +1,160 @@
+#!/usr/bin/perl
+
+# Usage example:
+# sudo parallel evtest -- /dev/input/by-id/*-event-{mouse,kbd} | ./mouse_kb_display
+
+use strict;
+use warnings;
+use Time::HiRes qw(time);
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Gtk2 '-init';
+use Glib  qw(TRUE FALSE);
+use utf8;
+
+# wait for the first line to appear on STDIN
+# so the window doesn't interfere with entering
+# sudo password
+<STDIN>;
+
+my $window = Gtk2::Window->new('toplevel');
+$window->signal_connect('delete_event' => sub { Gtk2->main_quit; });
+$window->set_border_width(5);
+my $vbox = &ret_vbox();
+$window->add($vbox);
+$window->modify_bg('normal', Gtk2::Gdk::Color->parse('#000000'));
+$window->show();
+my $label;
+
+sub set_label {
+  my $txt = shift;
+  my @txt_parts = split ' ', $txt;
+  my $markup = join ' ', map {
+    '<span font="FreeSans Bold 20" color="#FFFFFF" background="#010101">'.
+    ' '.Glib::Markup::escape_text($_).' '. # U+2006 thin spaces for padding
+    '</span>';
+  } @txt_parts;
+  $label->set_markup($markup);
+}
+
+sub ret_vbox {
+  my $vbox = Gtk2::VBox->new(FALSE,0);
+  $label = Gtk2::Label->new();
+  $label->set_padding(0, 0);
+  $label->set_alignment(0, .5);
+  set_label('M'x20); # initial size is to fit 20 "M" characters
+  $vbox->pack_start($label,TRUE,TRUE,0);
+  $vbox->show_all();
+  return $vbox;
+}
+
+# http://davesource.com/Solutions/20080924.Perl-Non-blocking-Read-On-Pipes-Or-Files.html
+# An non-blocking filehandle read that returns an array of lines read
+# Returns:  ($eof,@lines)
+my %nonblockGetLines_last;
+sub nonblockGetLines {
+	my ($fh,$timeout) = @_;
+
+	$timeout = 0 unless defined $timeout;
+	my $rfd = '';
+	$nonblockGetLines_last{$fh} = ''
+		unless defined $nonblockGetLines_last{$fh};
+
+	vec($rfd,fileno($fh),1) = 1;
+	return unless select($rfd, undef, undef, $timeout)>=0;
+	# I'm not sure the following is necessary?
+	return unless vec($rfd,fileno($fh),1);
+	my $buf = '';
+	my $n = sysread($fh,$buf,1024*1024);
+	# If we're done, make sure to send the last unfinished line
+	return (1,$nonblockGetLines_last{$fh}) unless $n;
+	# Prepend the last unfinished line
+	$buf = $nonblockGetLines_last{$fh}.$buf;
+	# And save any newly unfinished lines
+	$nonblockGetLines_last{$fh} =
+		(substr($buf,-1) !~ /[\r\n]/ && $buf =~ s/([^\r\n]*)$//) ? $1 : '';
+	$buf ? (0,split(/\n/,$buf)) : (0);
+}
+
+my $state = { };
+
+my $ev = *STDIN;
+my $flags = fcntl($ev, F_GETFL, 0) || die $!; # Get the current flags on the filehandle
+$flags |= O_NONBLOCK; # Add non-blocking to the flags
+fcntl($ev, F_SETFL, $flags) || die $!; # Set the flags on the filehandle
+
+Glib::Idle->add (\&watch_callback);
+Gtk2->main();
+
+my $old_out = '';
+
+sub watch_callback {
+  my ($eof,@lines) = nonblockGetLines($ev, 0.033);
+  for(@lines) {
+    if(/EV_(KEY|REL).*code [0-9]+ \((KEY|BTN|REL)_(.*?)\).*value (0|1|-1)/){
+      my ($code_type, $code_name, $value) = ($2, $3, $4);
+      if ($code_type eq 'KEY') {
+        # shorten LEFT*/RIGHT*, SPACE/BACKSPACE, PAGEUP/DOWN
+        $code_name =~ s/^LEFT(.+)/L$1/;
+        $code_name =~ s/^RIGHT(.+)/R$1/;
+        $code_name =~ s/SPACE$/SPC/;
+        $code_name =~ s/^PAGE(.+)/PG$1/;
+        # replace META with WIN, as that is what people are familiar with
+        # also COMPOSE with MENU (further below)
+        $code_name =~ s/^([LR])META$/$1WIN/;
+        # replace long names
+        my %key = (
+          'SEMICOLON' => ';',
+          'APOSTROPHE' => "'",
+          'COMMA' => ',',
+          'DOT' => '.',
+          'SLASH' => '/',
+          'BACKSLASH' => '\\',
+          'LBRACE' => '[',
+          'RBRACE' => ']',
+          'GRAVE' => '`',
+          'MINUS' => '-',
+          'EQUAL' => '=',
+          'ENTER' => '⏎',
+          'COMPOSE' => 'MENU',
+        );
+        $code_name = $key{$code_name} if defined($key{$code_name});
+      } elsif ($code_type eq 'REL' && $code_name eq 'WHEEL') {
+        # translate wheel to MWUP/MWDOWN
+        $code_name = {1 => 'MWUP', -1 => 'MWDOWN'}->{$value};
+      } elsif ($code_type eq 'BTN') {
+        # change mouse button names
+        my %but = (
+          'LEFT' => 'LMB',
+          'RIGHT' => 'RMB',
+          'MIDDLE' => 'MMB',
+          'SIDE' => 'XMB1',
+          'EXTRA' => 'XMB2',
+          'FORWARD' => 'XMB3',
+        );
+        $code_name = $but{$code_name} if defined($but{$code_name});
+      } else {
+        # ignore other inputs, like REL_X/REL_Y
+        $value = 0;
+      }
+      if ($value) {
+        $state->{$code_name} = time;
+      } else {
+        delete $state->{$code_name};
+      }
+    }
+  }
+  my $out = "";
+  for my $s_key(sort { $state->{$a} <=> $state->{$b} } keys %$state) {
+    $out .= "$s_key ";
+  }
+  if (!defined($old_out) || $out ne $old_out) {
+    set_label($out);
+    $old_out = $out;
+  }
+  for('MWUP', 'MWDOWN') {
+    delete $state->{$_} if defined $state->{$_} && time - $state->{$_} >= 0.099;
+  }
+
+  return $eof ? FALSE : TRUE;
+}
+
