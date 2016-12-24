@@ -1,0 +1,26 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use IO::Select;
+
+$|=1;
+my $sel = IO::Select->new;
+for(@ARGV) {
+  open(my $fh,"-|","evtest",$_);
+  my $flags = fcntl($fh, F_GETFL, 0) || die $!;
+  $flags |= O_NONBLOCK;
+  fcntl($fh, F_SETFL, $flags) || die $!;
+  $sel->add($fh);
+};
+my %lines;
+while(my @ready = $sel->can_read) {
+  for my $fh (@ready) {
+    my $n = sysread($fh, my $buf, 256);
+    next if !defined $n || $n < 1;
+    $lines{$fh} .= $buf;
+    $lines{$fh} =~ s/(.*\n)//s;
+    print $1 if defined $1;
+  }
+}
+

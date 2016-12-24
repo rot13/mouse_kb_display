@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 # Usage example:
-# sudo parallel evtest -- /dev/input/by-id/*-event-{mouse,kbd} | ./mouse_kb_display
+# sudo ./evtest_multi /dev/input/by-id/*-event-{mouse,kbd} | ./mouse_kb_display
 
 use strict;
 use warnings;
