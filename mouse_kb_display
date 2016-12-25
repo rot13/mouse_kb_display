@@ -6,6 +6,7 @@
 use strict;
 use warnings;
 use Time::HiRes qw(time);
+use IO::Select;
 use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use Gtk2 '-init';
 use Glib  qw(TRUE FALSE);
@@ -47,40 +48,33 @@ sub ret_vbox {
   return $vbox;
 }
 
-# http://davesource.com/Solutions/20080924.Perl-Non-blocking-Read-On-Pipes-Or-Files.html
-# An non-blocking filehandle read that returns an array of lines read
-# Returns:  ($eof,@lines)
-my %nonblockGetLines_last;
-sub nonblockGetLines {
-	my ($fh,$timeout) = @_;
-
-	$timeout = 0 unless defined $timeout;
-	my $rfd = '';
-	$nonblockGetLines_last{$fh} = ''
-		unless defined $nonblockGetLines_last{$fh};
-
-	vec($rfd,fileno($fh),1) = 1;
-	return unless select($rfd, undef, undef, $timeout)>=0;
-	# I'm not sure the following is necessary?
-	return unless vec($rfd,fileno($fh),1);
-	my $buf = '';
-	my $n = sysread($fh,$buf,1024*1024);
-	# If we're done, make sure to send the last unfinished line
-	return (1,$nonblockGetLines_last{$fh}) unless $n;
-	# Prepend the last unfinished line
-	$buf = $nonblockGetLines_last{$fh}.$buf;
-	# And save any newly unfinished lines
-	$nonblockGetLines_last{$fh} =
-		(substr($buf,-1) !~ /[\r\n]/ && $buf =~ s/([^\r\n]*)$//) ? $1 : '';
-	$buf ? (0,split(/\n/,$buf)) : (0);
-}
-
 my $state = { };
 
 my $ev = *STDIN;
 my $flags = fcntl($ev, F_GETFL, 0) || die $!; # Get the current flags on the filehandle
 $flags |= O_NONBLOCK; # Add non-blocking to the flags
 fcntl($ev, F_SETFL, $flags) || die $!; # Set the flags on the filehandle
+my $sel = IO::Select->new;
+$sel->add($ev);
+
+{
+  my %lines;
+  sub read_input_lines
+  {
+    my ($sel, $timeout) = @_;
+    my $ret = '';
+    my @ready = $sel->can_read($timeout);
+    for my $fh (@ready) {
+      my $bufref = \$lines{$fh};
+      $$bufref = '' if !defined $$bufref;
+      while(my $n = sysread($fh, $$bufref, 4096, length $$bufref)) {
+        $$bufref =~ s/.*\n//s;
+        $ret .= $& if defined $&;
+      }
+    }
+    split "\n", $ret;
+  }
+}
 
 Glib::Idle->add (\&watch_callback);
 Gtk2->main();
@@ -88,7 +82,7 @@ Gtk2->main();
 my $old_out = '';
 
 sub watch_callback {
-  my ($eof,@lines) = nonblockGetLines($ev, 0.033);
+  my @lines = read_input_lines($sel, 0.033);
   for(@lines) {
     if(/EV_(KEY|REL).*code [0-9]+ \((KEY|BTN|REL)_(.*?)\).*value (0|1|-1)/){
       my ($code_type, $code_name, $value) = ($2, $3, $4);
@@ -155,6 +149,6 @@ sub watch_callback {
     delete $state->{$_} if defined $state->{$_} && time - $state->{$_} >= 0.099;
   }
 
-  return $eof ? FALSE : TRUE;
+  return TRUE;
 }
 
