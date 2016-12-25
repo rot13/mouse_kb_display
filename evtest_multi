@@ -16,11 +16,12 @@ for(@ARGV) {
 my %lines;
 while(my @ready = $sel->can_read) {
   for my $fh (@ready) {
-    my $n = sysread($fh, my $buf, 256);
+    my $bufref = \$lines{$fh};
+    $$bufref = '' if !defined $$bufref;
+    my $n = sysread($fh, $$bufref, 4096, length $$bufref);
     next if !defined $n || $n < 1;
-    $lines{$fh} .= $buf;
-    $lines{$fh} =~ s/(.*\n)//s;
-    print $1 if defined $1;
+    $$bufref =~ s/.*\n//s;
+    print $& if defined $&;
   }
 }
 
